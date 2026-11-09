@@ -1,104 +1,118 @@
-# Simulador de Sistema de Arquivos (FS) — Etapa 1
+# Simulador de Sistema de Arquivos + Entrada/Saída
 
-Simulador em **Python 3** (sem bibliotecas externas) com interface de linha de comando interativa.
+Simulador em **Python 3** (sem bibliotecas externas), com linha de comando interativa.
 
-## O que foi implementado
-
-| Requisito | Como está no simulador |
+| Arquivo | Conteúdo |
 |---|---|
-| Hierarquia em árvore | Diretórios e arquivos em árvore, caminhos absolutos (`/home/user/doc.txt`) e relativos (`doc.txt`, `../logs`, `.`) |
-| CRUD | **C**: `mkdir`, `create` · **R**: `cat`, `ls`, `tree`, `stat` · **U**: `write`, `append`, `mv` · **D**: `rm`, `rmdir` |
-| Blocos de tamanho fixo | Disco simulado com tamanho de bloco e quantidade configuráveis (`format --block 4KB --blocks 16`) |
-| Estratégias de alocação | As 3: `contigua`, `encadeada` (FAT) e `indexada` (i-node) |
-| Diagnóstico do disco | `fs_status --details`: mapa gráfico, blocos por arquivo, fragmentação interna, fragmentação externa e necessidade de compactação |
-| Compactação | `defrag` junta todos os blocos livres no fim do disco |
+| `fs_sim.py` | **Etapa 1** – Sistema de Arquivos (árvore, CRUD, alocação contígua / encadeada / indexada, fragmentação) |
+| `io_sim.py` | **Etapa 2** – Entrada/Saída (transações de E/S, escalonamento do braço, SSD com wear leveling, RAID) |
+| `roteiro_testes_etapa2.txt` | Roteiro de testes da Etapa 2 |
 
 ## Como executar
 
 ```bash
-python fs_sim.py              # modo interativo
-python fs_sim.py < roteiro.txt  # executa uma lista de comandos de um arquivo
+python io_sim.py                              # modo interativo (Etapa 1 + Etapa 2)
+python io_sim.py < roteiro_testes_etapa2.txt  # roda o roteiro de testes
 ```
 
-Dentro do simulador, digite `help` para ver os comandos ou `demo` para rodar a demonstração completa.
+Dentro do simulador: `help`, `demo` (Etapa 1) ou `demo2` (Etapa 2).
+Todos os comandos da Etapa 1 continuam valendo no `io_sim.py`.
 
-## Comandos
+---
 
-```
-format [--block 4KB] [--blocks 16] [--strategy indexada|contigua|encadeada]
-mkdir [-p] <caminho>
-create <caminho> [--size 10KB] [--content "texto"]
-cat <caminho>
-write <caminho> --size N | --content "texto"
-append <caminho> --content "texto"
-mv <origem> <destino>
-rm [-r] <caminho>
-rmdir [-r] <caminho>
-ls [caminho] | cd <caminho> | pwd | tree [caminho] | stat <caminho>
-fs_status [--details]
-defrag
-demo | help | exit
-```
+## Etapa 2 – Entrada/Saída
 
-## Exemplo (alocação indexada)
+### Como as camadas se conectam
 
 ```
-> format --block 4KB --blocks 16 --strategy indexada
-> mkdir /sistema
-> mkdir /sistema/logs
-> create /sistema/logs/app.log --size 10KB
-> tree
-[ÁRVORE DO SISTEMA DE ARQUIVOS]
-/
-└── sistema/ [DIR]
-    └── logs/ [DIR]
-        └── app.log (10 KB) [ARQ]
+Comando do usuário (create, write_file, read_file, rm, defrag...)
+        │
+Sistema de Arquivos (Etapa 1)  -> decide quais blocos o arquivo usa
+        │   cada bloco lido/gravado vira uma TRANSAÇÃO DE E/S
+Camada RAID (none, 0, 1, 4, 5) -> decide em qual disco/faixa o bloco fica + paridade XOR
+        │
+Dispositivo físico
+   HDD -> fila de requisições + escalonamento do braço (trilhas)
+   SSD -> FTL: bloco lógico -> página física, GC e wear leveling
+```
 
-> fs_status --details
-Tamanho do Bloco de Disco: 4 KB | Total de Blocos: 16 (64 KB) | Estratégia: Indexada (i-node)
+### 1. Integração com o Sistema de Arquivos
+- `create`, `write`, `append`, `write_file` → gravação dos blocos de dados **e** do i-node.
+- `read_file` / `cat` → leitura dos blocos no disco físico e **verificação** de que os dados lidos são iguais aos gravados.
+- `rm` → libera os blocos (no SSD envia **TRIM**).
+- `defrag` → gera leituras e gravações para mover os blocos.
+
+### 2. Escalonamento do braço (HDD) e SSD
+- Algoritmos: **FCFS, SSTF, SCAN, C-SCAN, LOOK, C-LOOK** (`algo ...`).
+- Cada bloco é mapeado para uma trilha do disco (padrão: 200 trilhas, de 0 a 199).
+- A fila junta as requisições do sistema de arquivos com as de outros processos (`queue add`).
+- Mostra a ordem de atendimento, o cálculo do deslocamento e o total de trilhas.
+- A posição da cabeça é mantida entre um comando e outro.
+- `simulate --algo all` compara todos os algoritmos.
+- **SSD** (`device ssd`): não tem braço. Usa páginas e blocos de apagamento, grava sempre em uma página nova (a antiga fica inválida), faz coleta de lixo e **wear leveling** dinâmico e estático. `wear_compare` mostra o desgaste com e sem nivelamento.
+
+### 3. RAID
+- **RAID 0**: distribui os blocos entre os discos (sem redundância).
+- **RAID 1**: espelhamento.
+- **RAID 4**: paridade em disco fixo.
+- **RAID 5**: paridade distribuída entre os discos.
+- A paridade é um **XOR real** dos bytes. A gravação usa lê-modifica-escreve: nova paridade = paridade antiga XOR dado antigo XOR dado novo.
+- `fail N` apaga o conteúdo do disco N. A leitura é reconstruída por XOR (RAID 4/5) ou pelo espelho (RAID 1). No RAID 0 os dados são perdidos.
+- `rebuild N` troca o disco e reconstrói os dados.
+
+### Comandos da Etapa 2
+
+```
+write_file <caminho> "texto" | --size N
+read_file <caminho>
+device hdd|ssd [--tracks 200] [--pages 4]
+algo fcfs|sstf|scan|cscan|look|clook
+head <trilha> [--dir up|down] [--disk N]
+queue add <t1> <t2> ... [--disk N] | queue show | queue clear
+simulate --head 53 --queue 98,183,37,122,14 [--algo sstf|all] [--tracks 200] [--dir up]
+raid none|0|1|4|5 [--disks N]
+raid_status | fail <N> | rebuild <N>
+ssd_status | wl on|off | wear_test <arquivo> --writes N | wear_compare [--writes 300]
+io_status | demo2
+```
+
+### Exemplo 2.1 — SSTF
+
+```
+> simulate --algo sstf --head 53 --queue 98,183,37,122,14
+[E/S] Requisições de leitura/escrita pendentes nas trilhas: [98, 183, 37, 122, 14]
+Posição atual da cabeça de leitura: Trilha 53 (disco de 0 a 199)
+
+--- ESCALONAMENTO DE DISCO: SSTF (Shortest Seek Time First) ---
+Ordem de Atendimento  : 53 -> 37 -> 14 -> 98 -> 122 -> 183
+Deslocamento da Cabeça: |53-37| + |37-14| + |14-98| + |98-122| + |122-183|
+Total de Movimento    : 16 + 23 + 84 + 24 + 61 = 208 trilhas
+```
+
+### Exemplo 2.2 — RAID 5 com falha
+
+```
+> raid 5 --disks 3
+> write_file /dados/planilha.csv --size 8KB
+[E/S - DISTRIBUIÇÃO EM DISCO]
+Disco 1: [Faixa 01: Bloco FS 02: planilha.csv - Parte 1 (4 KB)]
+Disco 2: [Faixa 01: Bloco FS 03: planilha.csv - Parte 2 (4 KB)]
+Disco 3: [Faixa 01: PARIDADE: XOR(Bloco 02, Bloco 03)]
 ...
-  [R ] [iA] [A1] [A2] [A3] [..] [..] [..]
-...
-Bloco 00      [INODE_RAIZ]  : Diretório '/'
-Bloco 01      [INODE_A]     : Arquivo '/sistema/logs/app.log' (ponteiros: 02,03,04)
-Bloco 02      [DADO]        : '/sistema/logs/app.log' (Bloco 1 - 4096 bytes ocupados)
-Bloco 03      [DADO]        : '/sistema/logs/app.log' (Bloco 2 - 4096 bytes ocupados)
-Bloco 04      [DADO]        : '/sistema/logs/app.log' (Bloco 3 - 2048 bytes ocupados)
-Bloco 05..15                  : [LIVRE]
-
---- RELATÓRIO DE FRAGMENTAÇÃO ---
-Tamanho Real do Arquivo 'app.log': 10240 bytes (10 KB)
-Espaço Alocado no Disco          : 12288 bytes (3 blocos de 4 KB)
-Fragmentação Interna             : 2048 bytes (50% de desperdício no Bloco 04)
-Fragmentação Externa             : 0 bytes
-Necessidade de Compactação       : NÃO (blocos alocados via i-node indexado; ...)
+> fail 2
+[TESTE DE FALHA SIMULADO]
+* Falha forçada no Disco 2! (conteúdo do disco perdido)
+> read_file /dados/planilha.csv
+[VERIFICAÇÃO] dados lidos do disco físico == dados gravados: OK
+* Recuperando Bloco FS 03 via operação XOR: (Disco 1 XOR Disco 3) -> Reconstrução [OK]
 ```
 
-## Exemplo (alocação contígua com fragmentação externa)
+### Trechos de código mais relevantes (`io_sim.py`)
+- `schedule()` / `schedule_report()` — algoritmos de escalonamento e cálculo do deslocamento.
+- `class SSD` — FTL, escrita fora do lugar, coleta de lixo (`_gc`) e wear leveling (`_take_block`, `_static_wear_leveling`).
+- `class Storage` — RAID: `write_block` (paridade lê-modifica-escreve), `read_block` (reconstrução XOR), `rebuild`.
+- `IOShell.dispatch()` — transforma as transações do sistema de arquivos em filas por disco e mostra o atendimento.
 
-```
-> format --block 1KB --blocks 12 --strategy contigua
-> mkdir -p /home/user
-> create /home/user/a.txt --size 3KB
-> create /home/user/b.txt --size 2500B
-> create /home/user/c.txt --size 3KB
-> create /home/user/d.txt --size 2KB
-> rm /home/user/b.txt
-> create /home/user/e.txt --size 4KB
-ERRO: FRAGMENTAÇÃO EXTERNA: o arquivo precisa de 4 blocos seguidos. Existem 4 blocos
-livres, mas espalhados (maior lacuna = 3 blocos). Use 'defrag' para compactar o disco.
-> defrag
-> create /home/user/e.txt --size 4KB      (agora funciona)
-```
-
-## Trechos de código mais relevantes
-
-- `FileSystem._allocate()` — as 3 estratégias de alocação (contígua com *first-fit*, encadeada com tabela FAT, indexada com bloco de i-node).
-- `FileSystem.status()` — mapa gráfico do disco e relatório de fragmentação.
-- `FileSystem.defrag()` — compactação, reorganizando blocos, ponteiros da FAT e i-nodes.
-- `FileSystem.resolve()` — navegação por caminhos absolutos e relativos.
-
-## Observações
-
-- Tudo roda em memória (não há persistência, que é opcional na atividade).
-- Na alocação indexada, a raiz `/` ocupa o bloco 0 (i-node raiz) e cada arquivo ocupa 1 bloco de i-node + os blocos de dados, como no exemplo do enunciado.
+### Observações
+- Tudo roda em memória (não há persistência, que é opcional).
+- Na alocação indexada, o bloco 00 é o i-node da raiz `/`. Ele nunca é gravado com dados, por isso aparece vazio no RAID.

@@ -519,7 +519,6 @@ class FileSystem:
         if self.strategy == "contigua":
             largest = max((s for _, s in holes), default=0)
             ext_blocks = free_total - largest if len(holes) > 1 else 0
-            # há lacuna livre "presa" entre blocos ocupados?
             last_used = max((i for i, b in enumerate(d.blocks) if b is not None), default=-1)
             gaps = [h for h in holes if h[0] < last_used]
             out.append(f"Lacunas livres                   : {len(holes)} "
